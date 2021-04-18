@@ -1,0 +1,38 @@
+---
+- name: Delete unused vols where tag:Name doesn't start with prefix
+  hosts: localhost
+  gather_facts: no
+  max_fail_percentage: "{{ cli_max_fail_percentage|default(100) }}"
+  vars:
+    cli_delete: false
+  tasks:
+  - name: Get list of available/unused vols
+    ec2_vol_facts:
+      region: "{{ cli_region }}"
+      filters:
+        status: available
+    register: ec2_vol_info
+
+  - name: Get list of available/unused vols with tag:Name prefix as DND
+    ec2_vol_facts:
+      region: "{{ cli_region }}"
+      filters:
+        status: available
+        "tag:Name": "DND*"
+    register: ec2_vol_info_prefix
+
+  - name: Print vols to be deleted
+    debug:
+      msg: "Ids of vol not having DND in Name tag: {{ ec2_vol_info.volumes|map(attribute='id')|list|difference(ec2_vol_info_prefix.volumes|map(attribute='id')|list) }}"
+
+  - name: Delete unused vols where tag:Name doesn't start with prefix
+    ec2_vol:
+      region: "{{cli_region}}"
+      id: '{{ item }}'
+      state: absent
+    loop: "{{ ec2_vol_info.volumes|map(attribute='id')|list|difference(ec2_vol_info_prefix.volumes|map(attribute='id')|list) }}"
+    when: cli_delete|bool
+
+  - name: Print vols which haven't got deleted due to prefix
+    debug:
+      msg: "Ids of vol having DND in Name tag hence haven't got deleted: {{ ec2_vol_info_prefix.volumes|map(attribute='id')|list }}"
