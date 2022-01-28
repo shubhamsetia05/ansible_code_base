@@ -1,0 +1,92 @@
+---
+# Author: Shubham Setia
+# required: cli_region          : The region where the snapshots are present
+# optional: cli_delete          : Pass true if you actually want to delete snapshots, default value is false
+
+- name: Delete old snapshots where tag:Name doesn't start with prefix
+  hosts: localhost
+  gather_facts: yes
+  max_fail_percentage: "{{ cli_max_fail_percentage|default(100) }}"
+  vars_files:
+    - ../vars_files/secrets.yml
+  vars:
+    cli_delete: false
+    slack_domain: slackproxy.p.example.com
+    slack_token: "{{ slack_token }}"
+    slack_channel: "#test"
+  tasks:
+  - name: Get list of all mongo snapshots
+    ec2_snapshot_facts:
+      region: "{{ cli_region }}"
+      filters:
+        "tag:Name": 'mongo*'
+        status: completed
+    register: ec2_mongo_snapshots
+
+  - name: Get iso date format for 32 days ago
+    command: "date --date='32 days ago' --iso-8601"
+    register: old_date
+
+  - name: Get snapshot ids and tag:Name into list older than 32 days
+    set_fact:
+      snap_list: "{{ [] if my_old_snaps is string else my_old_snaps }}"
+      snap_tag_name_list: "{{ [] if my_old_snap_tag_name is string else my_old_snap_tag_name }}"
+    vars:
+      old_snaps: |
+        {% for snap in ec2_mongo_snapshots.snapshots %}
+        {% if snap.start_time.split('T')[0]|to_datetime('%Y-%m-%d') <= old_date.stdout|to_datetime('%Y-%m-%d') %}
+        - {{ snap.snapshot_id }}
+        {% endif %}
+        {% endfor %}
+      my_old_snaps: "{{ old_snaps|from_yaml }}"
+      old_snap_tag_name: |
+        {% for tag_name in ec2_mongo_snapshots.snapshots %}
+        {% if tag_name.start_time.split('T')[0]|to_datetime('%Y-%m-%d') <= old_date.stdout|to_datetime('%Y-%m-%d') %}
+        - "{{ tag_name.tags.Name }}: {{ tag_name.snapshot_id }}"
+        {% endif %}
+        {% endfor %}
+      my_old_snap_tag_name: "{{ old_snap_tag_name|from_yaml }}"
+
+  - name: Get list of snapshots with tag:Name prefix as DND
+    ec2_snapshot_facts:
+      region: "{{ cli_region }}"
+      filters:
+        "tag:Name": 'DND-mongo*'
+        status: completed
+    register: ec2_snapshot_facts_do_not_delete
+
+  - name: Task block
+    block:
+      - name: Print snapshot ids to be deleted
+        debug:
+          msg: "Ids of snapshots not having DND in Name tag: {{ snapshot_ids_to_be_deleted }}"
+
+      - name: Slack notification
+        slack:
+          domain: "{{ slack_domain }}"
+          token: "{{ slack_token }}"
+          msg: |
+            AWS ebs snapshots to be deleted on Wednesday:
+            {% for snapshot in snapshot_tags_to_be_deleted %}
+            `{{ snapshot }}`
+            {% endfor %}
+          channel: "{{ slack_channel }}"
+          validate_certs: yes
+        when: snapshot_tags_to_be_deleted|length > 0
+
+      - name: Delete unused snaps where tag:Name doesn't start with prefix
+        ec2_snapshot:
+          region: "{{ cli_region }}"
+          snapshot_id: '{{ item }}'
+          state: absent
+        loop: "{{ snapshot_ids_to_be_deleted }}"
+        when: cli_delete|bool
+
+      - name: Print snaps which haven't got deleted due to prefix
+        debug:
+          msg: "Ids of vol having DND in Name tag hence haven't got deleted: {{ snapshot_ids_dnd }}"
+    vars:
+      snapshot_ids_to_be_deleted: "{{ snap_list|difference(ec2_snapshot_facts_do_not_delete.snapshots|map(attribute='snapshot_id')|list) }}"
+      snapshot_tags_to_be_deleted: "{{ snap_tag_name_list|difference(ec2_snapshot_facts_do_not_delete.snapshots|map(attribute='tags.Name')|list) }}"
+      snapshot_ids_dnd: "{{ ec2_snapshot_facts_do_not_delete.snapshots|map(attribute='snapshot_id')|list }}"
+
